@@ -8,7 +8,7 @@ class AttrDict(dict):
             super().__init__(*args, **kwargs)
             self.__dict__ = self
 
-
+GS_CHK_POINT = 30_000
 if __name__ == "__main__":
     # ----- Parser -----
     parser = argparse.ArgumentParser(description='Script to optimize a full SuGaR model.')
@@ -90,7 +90,7 @@ if __name__ == "__main__":
         args.gaussians_per_triangle = 6
         print('Using low poly config.')
     if args.high_poly:
-        args.n_vertices_in_mesh = 1_000_000
+        args.n_vertices_in_mesh = 3_000_000
         args.gaussians_per_triangle = 1
         print('Using high poly config.')
     if args.refinement_time == 'short':
@@ -123,7 +123,7 @@ if __name__ == "__main__":
                 -s {args.scene_path} \
                 -m {gs_checkpoint_dir} \
                 {white_background_str}\
-                --iterations 7_000"
+                --iterations {GS_CHK_POINT}"
         )
     else:
         print("A vanilla 3DGS checkpoint was provided. Skipping the vanilla 3DGS optimization.")
@@ -136,7 +136,7 @@ if __name__ == "__main__":
         f"python train.py \
             -s {args.scene_path} \
             -c {gs_checkpoint_dir} \
-            -i 7_000 \
+            -i {GS_CHK_POINT} \
             -r {args.regularization_type} \
             -l {args.surface_level} \
             -v {args.n_vertices_in_mesh} \
