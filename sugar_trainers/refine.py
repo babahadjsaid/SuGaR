@@ -1,4 +1,4 @@
-import os
+import os, gc
 import numpy as np
 import torch
 import open3d as o3d
@@ -331,6 +331,7 @@ def refined_training(args):
         eval_split=use_eval_split,
         eval_split_interval=n_skip_images_for_eval_split,
         white_background=use_white_background,
+        batch_size= train_num_images_per_batch
         )
 
     CONSOLE.print(f'{len(nerfmodel.training_cameras)} training images detected.')
@@ -520,12 +521,7 @@ def refined_training(args):
         if iteration >= num_iterations:
             break
         
-        # Shuffle images
-        shuffled_idx = torch.randperm(len(nerfmodel.training_cameras))
-        train_num_images = len(shuffled_idx)
-        
-        # We iterate on images
-        for i in range(0, train_num_images, train_num_images_per_batch):
+        for camera_indices, gt_image in enumerate(nerfmodel.training_cameras.image_dataloader):
             iteration += 1
             
             # Update learning rates
@@ -544,15 +540,12 @@ def refined_training(args):
                 if regularize and iteration >= start_reset_neighbors_from:
                     sugar.reset_neighbors()
             
-            start_idx = i
-            end_idx = min(i+train_num_images_per_batch, train_num_images)
             
-            camera_indices = shuffled_idx[start_idx:end_idx]
             
             # Computing rgb predictions
             if not no_rendering:
                 outputs = sugar.render_image_gaussian_rasterizer( 
-                    camera_indices=camera_indices.item(),
+                    camera_indices=camera_indices,
                     verbose=False,
                     bg_color = bg_tensor,
                     sh_deg=current_sh_levels-1,
@@ -579,13 +572,12 @@ def refined_training(args):
                 
                 pred_rgb = pred_rgb.transpose(-1, -2).transpose(-2, -3)  # TODO: Change for torch.permute
                 
-                # Gather rgb ground truth
-                gt_image = nerfmodel.get_gt_image(camera_indices=camera_indices)           
-                gt_rgb = gt_image.view(-1, sugar.image_height, sugar.image_width, 3)
-                gt_rgb = gt_rgb.transpose(-1, -2).transpose(-2, -3)
+                         
+                gt_image = gt_image.cuda().view(-1, sugar.image_height, sugar.image_width, 3)
+                gt_image = gt_image.transpose(-1, -2).transpose(-2, -3)
                     
                 # Compute loss 
-                loss = loss_fn(pred_rgb, gt_rgb)
+                loss = loss_fn(pred_rgb, gt_image)
                         
                 if enforce_entropy_regularization and iteration > start_entropy_regularization_from and iteration < end_entropy_regularization_at:
                     if iteration == start_entropy_regularization_from + 1:
@@ -624,14 +616,14 @@ def refined_training(args):
                             if (use_sdf_estimation_loss or enforce_samples_to_be_on_surface) and iteration > start_sdf_estimation_from:
                                 if iteration == start_sdf_estimation_from + 1:
                                     CONSOLE.print("\n---INFO---\nStarting SDF estimation loss.")
-                                fov_camera = nerfmodel.training_cameras.p3d_cameras[camera_indices.item()]
+                                fov_camera = nerfmodel.training_cameras.p3d_cameras[camera_indices]
                                 
                                 # Render a depth map using gaussian splatting
                                 if backpropagate_gradients_through_depth:                                
                                     point_depth = fov_camera.get_world_to_view_transform().transform_points(sugar.points)[..., 2:].expand(-1, 3)
                                     max_depth = point_depth.max()
                                     depth = sugar.render_image_gaussian_rasterizer(
-                                                camera_indices=camera_indices.item(),
+                                                camera_indices=camera_indices,
                                                 bg_color=max_depth + torch.zeros(3, dtype=torch.float, device=sugar.device),
                                                 sh_deg=0,
                                                 compute_color_in_rasterizer=False,#compute_color_in_rasterizer,
@@ -645,7 +637,7 @@ def refined_training(args):
                                         point_depth = fov_camera.get_world_to_view_transform().transform_points(sugar.points)[..., 2:].expand(-1, 3)
                                         max_depth = point_depth.max()
                                         depth = sugar.render_image_gaussian_rasterizer(
-                                                    camera_indices=camera_indices.item(),
+                                                    camera_indices=camera_indices,
                                                     bg_color=max_depth + torch.zeros(3, dtype=torch.float, device=sugar.device),
                                                     sh_deg=0,
                                                     compute_color_in_rasterizer=False,#compute_color_in_rasterizer,
@@ -860,7 +852,9 @@ def refined_training(args):
                         )
                 sugar.adapt_to_cameras(nerfmodel.training_cameras)
                 # TODO: resize GT images
-        
+            del gt_image
+            torch.cuda.empty_cache()
+            gc.collect()
         epoch += 1
 
     CONSOLE.print(f"Training finished after {num_iterations} iterations with loss={loss.detach().item()}.")

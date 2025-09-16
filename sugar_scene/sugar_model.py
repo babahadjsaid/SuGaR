@@ -79,7 +79,7 @@ def inverse_radius_fn(radiuses:torch.Tensor):
         )
     return torch.cat([quaternions, scales], dim=-1)
 
-
+# --------------------------------------------- SuGaR model ------------------------------------------------ #
 class SuGaR(nn.Module):
     """Main class for SuGaR models.
     Because SuGaR optimization starts with first optimizing a vanilla Gaussian Splatting model for 7k iterations,
@@ -917,9 +917,11 @@ class SuGaR(nn.Module):
                                    probabilities_proportional_to_opacity=False,
                                    probabilities_proportional_to_volume=True,):
         """Sample points in the Gaussians.
-
+        1. We sample a Gaussian according to its volume and opacity.
+        2. We sample a point in the Gaussian using a normal distribution scaled by the Gaussian's scaling.
+        
         Args:
-            num_samples (_type_): _description_
+            num_samples (_type_): _number of points to sample in total.
             sampling_scale_factor (_type_, optional): _description_. Defaults to 1..
             mask (_type_, optional): _description_. Defaults to None.
             probabilities_proportional_to_opacity (bool, optional): _description_. Defaults to False.
@@ -946,7 +948,11 @@ class SuGaR(nn.Module):
         areas = areas.abs()
         # cum_probs = areas.cumsum(dim=-1) / areas.sum(dim=-1, keepdim=True)
         cum_probs = areas / areas.sum(dim=-1, keepdim=True)
-        
+        # areas here represents the relative probability of sampling each Gaussian, what is relative probability ? answer: it sums to 1. 
+        # so if it sums to 1 what does this mean  ? answer: it means that the probability of sampling each Gaussian is proportional 
+        # to its area. so means that if a Gaussian has an area of 0.1 and another has an area of 0.2, the probability of sampling the first 
+        # Gaussian is 0.1 / (0.1 + 0.2) = 0.333 and the probability of sampling the second Gaussian is 0.2 / (0.1 + 0.2) = 0.666.
+        # so bigger the area, higher the probability of sampling that Gaussian.
         random_indices = torch.multinomial(cum_probs, num_samples=num_samples, replacement=True)
         if mask is not None:
             valid_indices = torch.arange(self.n_points, device=self.device)[mask]
@@ -1285,6 +1291,40 @@ class SuGaR(nn.Module):
                     opacity_min_clamp=1e-16,
                     return_closest_gaussian_opacities=False,
                     return_beta=False,):
+        """Returns the field values at the given points x.
+            equations: 
+            -   closest_gaussians_idx = knn(x, centers of gaussians)
+            -   closest_gaussian_opacities = [strength_i * exp(-1/2 * ||inv_scaled_rotation_i * (x - center_i)||^2) for i in closest_gaussians]
+            -   density = sum_i strength_i * exp(-1/2 * ||inv_scaled_rotation_i * (x - center_i)||^2)
+            -   beta = f(scaling_i of closest gaussians)
+            -   sdf = beta * (sqrt(-2 * log(density)) - sqrt(-2 * log(density_threshold)))
+            -   sdf_grad = - beta / (density * sqrt(-2 * log(density))) * sum_i strength_i * exp(-1/2 * ||inv_scaled_rotation_i * (x - center_i)||^2) * (inv_scaled_rotation_i^T * inv_scaled_rotation_i * (x - center_i))
+            -   If gaussian_idx is provided, we only use the gaussians in gaussian_idx to compute the field values.
+            -   If closest_gaussians_idx is provided, we use it instead of computing it with knn.   
+
+        Args:
+            x (torch.Tensor): Points to evaluate the field at. Shape is (n_points, 3).
+            gaussian_idx (torch.Tensor, optional): Indices of the Gaussians to use for each point. Shape is (n_points, ). 
+                If None, all Gaussians are used. Defaults to None.
+            closest_gaussians_idx (torch.Tensor, optional): Indices of the closest Gaussians to use for each point. Shape is (n_points, n_neighbors).
+                If None, the closest Gaussians are computed using self.knn_idx. Defaults to None.
+            gaussian_strengths (torch.Tensor, optional): Strengths of the Gaussians to use. Shape is (n_gaussians, 1).
+                If None, self.strengths is used. Defaults to None.
+            gaussian_centers (torch.Tensor, optional): Centers of the Gaussians to use. Shape is (n_gaussians, 3).
+                If None, self.points is used. Defaults to None.
+            gaussian_inv_scaled_rotation (torch.Tensor, optional): Inverse scaled rotation matrices of the Gaussians to use. Shape is (n_gaussians, 3, 3).
+                If None, self.get_covariance(return_full_matrix=True, return_sqrt=True, inverse_scales=True) is used. Defaults to None.
+            return_sdf (bool, optional): Whether to return the signed distance field. Defaults to True.
+            density_threshold (float, optional): Density threshold for the sdf computation. Defaults to 1..
+            density_factor (float, optional): Factor to multiply the density by. Defaults to 1..
+            return_sdf_grad (bool, optional): Whether to return the gradient of the signed distance field. Defaults to False.
+            sdf_grad_max_value (float, optional): Maximum value for the sdf gradient. Defaults to 10..
+            opacity_min_clamp (float, optional): Minimum value to clamp the density to. Defaults to 1e-16.
+            return_closest_gaussian_opacities (bool, optional): Whether to return the opacities of the closest Gaussians. Defaults to False.
+            return_beta (bool, optional): Whether to return the beta value used for the sdf computation. Defaults to False. 
+        Returns:
+            dict: A dictionary containing the requested field values. Keys are 'sdf', 'sdf_grad', 'density', 'closest_gaussian_opacities', 'beta'.
+        """
         if gaussian_strengths is None:
             gaussian_strengths = self.strengths
         if gaussian_centers is None:
@@ -1346,12 +1386,25 @@ class SuGaR(nn.Module):
             
         return fields
     
-    def get_points_depth_in_depth_map(self, fov_camera, depth, points_in_camera_space):
-        depth_view = depth.unsqueeze(0).unsqueeze(-1).permute(0, 3, 1, 2)
+    def get_points_depth_in_depth_map(self, fov_camera, depth_map, points_in_camera_space):
+        """
+             This function returns the depth of the given points in the given depth map.
+                Points that are outside the camera frustum are clamped to the nearest pixel on the borders.
+        Args:
+            fov_camera (torch.Tensor): A FoVPerspectiveCameras object from pytorch3d.
+            depth_map (torch.Tensor): A depth map of shape (H, W).
+            points_in_camera_space (torch.Tensor):  Points to look for in the depth map, represented in camera coordinate system. 
+                                                    Shape is (n_points, 3). Z axis is forward.
+        Returns:
+            _type_: The depth of the points in the depth map. Shape is (n_points, ).
+        """
+        depth_view = depth_map[None, None, ...]  # Shape is (1, 1, H, W)
         pts_projections = fov_camera.get_projection_transform().transform_points(points_in_camera_space)
 
         factor = -1 * min(self.image_height, self.image_width)
         # todo: Parallelize these two lines with a tensor [image_width, image_height]
+        # divisors = torch.tensor([self.image_width, self.image_height], device=pts_projections.device)
+        # pts_projections[..., :2] = factor / divisors * pts_projections[..., :2]
         pts_projections[..., 0] = factor / self.image_width * pts_projections[..., 0]
         pts_projections[..., 1] = factor / self.image_height * pts_projections[..., 1]
         pts_projections = pts_projections[..., :2].view(1, -1, 1, 2)
@@ -2392,6 +2445,9 @@ class SuGaR(nn.Module):
         for k, v in kwargs.items():
             checkpoint[k] = v
         torch.save(checkpoint, path)        
+
+# ----------------------------------------- End of SuGaR model ----------------------------------------- #
+
 
 
 def load_refined_model(refined_sugar_path, nerfmodel:GaussianSplattingWrapper, device=None):

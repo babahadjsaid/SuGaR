@@ -84,6 +84,7 @@ class GaussianSplattingWrapper:
                  background=[0., 0., 0.],
                  white_background=False,
                  remove_camera_indices=[],
+                 batch_size= 1
                  ) -> None:
         """Initialize the Gaussian Splatting model wrapper.
         
@@ -136,7 +137,6 @@ class GaussianSplattingWrapper:
             white_background=white_background,
             remove_indices=remove_camera_indices,
             )
-        
         if eval_split:
             self.cam_list = []
             self.test_cam_list = []
@@ -156,7 +156,7 @@ class GaussianSplattingWrapper:
             
         # ns_cameras = convert_camera_from_gs_to_nerfstudio(self.cam_list)
         # self.training_cameras = NeRFCameras.from_ns_cameras(ns_cameras)
-        self.training_cameras = CamerasWrapper(self.cam_list)
+        self.training_cameras = CamerasWrapper(self.cam_list, batch_size=batch_size)
             
         self.gaussians = GaussianModel(self.model_params.sh_degree)
         self.gaussians.load_ply(

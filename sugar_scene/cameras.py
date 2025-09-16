@@ -4,9 +4,11 @@ import json
 import numpy as np
 import torch
 from PIL import Image
-
+from torch.utils.data import DataLoader
 from pytorch3d.renderer import FoVPerspectiveCameras as P3DCameras
 from pytorch3d.renderer.cameras import _get_sfm_calibration_matrix
+from torch.utils.data import Dataset
+import torchvision.transforms as T
 
 from sugar_utils.graphics_utils import focal2fov, fov2focal, getWorld2View2, getProjectionMatrix
 from sugar_utils.general_utils import PILtoTorch
@@ -67,7 +69,8 @@ def load_gs_cameras(source_path, gs_output_path, image_resolution=1,
         print(f"Warning: image extension {extension} not supported.")
     else:
         print(f"Found image extension {extension}")
-    
+    # read a random image to get the height and width
+
     for cam_idx in range(len(camera_transforms)):
         camera_transform = camera_transforms[cam_idx]
         
@@ -97,42 +100,15 @@ def load_gs_cameras(source_path, gs_output_path, image_resolution=1,
         name = camera_transform['img_name']
         image_path = os.path.join(image_dir,  name + extension)
         
-        if load_gt_images:
-            image = Image.open(image_path)
-            if white_background:
-                im_data = np.array(image.convert("RGBA"))
-                bg = np.array([1,1,1])
-                norm_data = im_data / 255.0
-                arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-                image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
-            orig_w, orig_h = image.size
-            downscale_factor = 1
-            if image_resolution in [1, 2, 4, 8]:
-                downscale_factor = image_resolution
-                # resolution = round(orig_w/(image_resolution)), round(orig_h/(image_resolution))
-            if max(orig_h, orig_w) > max_img_size:
-                additional_downscale_factor = max(orig_h, orig_w) / max_img_size
-                downscale_factor = additional_downscale_factor * downscale_factor
-            resolution = round(orig_w/(downscale_factor)), round(orig_h/(downscale_factor))
-            resized_image_rgb = PILtoTorch(image, resolution)
-            gt_image = resized_image_rgb[:3, ...]
-            
-            image_height, image_width = None, None
-        else:
-            gt_image = None
-            if image_resolution in [1, 2, 4, 8]:
-                downscale_factor = image_resolution
-                # resolution = round(orig_w/(image_resolution)), round(orig_h/(image_resolution))
-            if max(height, width) > max_img_size:
-                additional_downscale_factor = max(height, width) / max_img_size
-                downscale_factor = additional_downscale_factor * downscale_factor
-            image_height, image_width = round(height/downscale_factor), round(width/downscale_factor)
+        gt_image = None
         
         gs_camera = GSCamera(
             colmap_id=id, image=gt_image, gt_alpha_mask=None,
             R=R, T=T, FoVx=fov_x, FoVy=fov_y,
             image_name=name, uid=id,
-            image_height=image_height, image_width=image_width,)
+            image_height=height, image_width=width,
+            img_path=image_path,
+            wht_bg=white_background,)
         
         cam_list.append(gs_camera)
 
@@ -146,6 +122,7 @@ class GSCamera(torch.nn.Module):
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  image_height=None, image_width=None,
+                    img_path=None, wht_bg=False
                  ):
         """
         Args:
@@ -176,6 +153,8 @@ class GSCamera(torch.nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.img_path = img_path
+        self.wht_bg = wht_bg
 
         try:
             self.data_device = torch.device(data_device)
@@ -415,6 +394,37 @@ def convert_camera_from_pytorch3d_to_gs(
     return gs_cameras
 
 
+class ImageDataset(Dataset):
+    def __init__(self, camera_list, transform=None):
+        """
+        Dataset for lazy-loading GT images.
+        Args:
+            camera_list: List of camera objects (from CamerasWrapper), each with image_path and metadata.
+            max_res: Max resolution for resizing (default 1920).
+            transform: Optional torchvision transforms.
+        """
+        self.camera_list = camera_list
+        self.transform = transform or T.Compose([
+            T.ToTensor(),
+        ])
+
+    def __len__(self):
+        return len(self.camera_list)
+
+    def __getitem__(self, idx):
+        camera = self.camera_list[idx]
+        # Load image from path (assume camera has image_path attribute)
+        image = Image.open(camera.img_path)
+        if camera.wht_bg:
+            im_data = np.array(image.convert("RGBA"))
+            bg = np.array([1,1,1])
+            norm_data = im_data / 255.0
+            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")     
+        image_tensor = self.transform(image).permute(1, 2, 0)
+        return image_tensor.detach()
+
+
 class CamerasWrapper:
     """Class to wrap Gaussian Splatting camera parameters 
     and facilitates both usage and integration with PyTorch3D.
@@ -424,6 +434,7 @@ class CamerasWrapper:
         gs_cameras,
         p3d_cameras=None,
         p3d_cameras_computed=False,
+        batch_size: int = 1
     ) -> None:
         """
         Args:
@@ -463,6 +474,16 @@ class CamerasWrapper:
         c2w[:, :3, 1:3] *= -1
         c2w = c2w[:, :3, :]
         self.camera_to_worlds = c2w
+        self.image_dataset = ImageDataset(gs_cameras)
+        self.image_dataloader = DataLoader(
+            self.image_dataset,
+            batch_size=batch_size,  # Default to 1, matches train_num_images_per_batch
+            shuffle=True,  # Preserve order for camera indices
+            num_workers=12,  # For prefetching (adjust based on CPU cores)
+            prefetch_factor=60,  # Prefetch 2 batches ahead
+            pin_memory=True,  # Faster GPU transfer
+            persistent_workers=True,  # Keep workers alive
+        )
 
     @classmethod
     def from_p3d_cameras(

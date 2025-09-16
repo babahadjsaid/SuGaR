@@ -6,6 +6,7 @@ from sugar_trainers.coarse_density_and_dn_consistency import coarse_training_wit
 from sugar_extractors.coarse_mesh import extract_mesh_from_coarse_sugar
 from sugar_trainers.refine import refined_training
 from sugar_extractors.refined_mesh import extract_mesh_and_texture_from_refined_sugar
+import torch
 
 
 class AttrDict(dict):
@@ -15,6 +16,8 @@ class AttrDict(dict):
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method('spawn')# good solution !!!!
+    torch.multiprocessing.set_sharing_strategy('file_system')  # Use files instead of SHM for data sharing
     # ----- Parser -----
     parser = argparse.ArgumentParser(description='Script to optimize a full SuGaR model.')
     

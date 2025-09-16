@@ -16,7 +16,7 @@ from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
-from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from utils.camera_utils import cameraDataLoader_from_camInfos, camera_to_JSON
 
 class Scene:
 
@@ -39,6 +39,8 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
+        self.train_camInfos = {}
+        self.test_camInfos = {}
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
@@ -70,9 +72,11 @@ class Scene:
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+            self.train_cameras[resolution_scale] = cameraDataLoader_from_camInfos(scene_info.train_cameras, resolution_scale, args, shuffle=True)
+            self.train_camInfos[resolution_scale] = scene_info.train_cameras  # Keep camInfos for validation
             print("Loading Test Cameras")
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+            self.test_cameras[resolution_scale] = cameraDataLoader_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+            self.test_camInfos[resolution_scale] = scene_info.test_cameras  # Keep camInfos for validation
 
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
@@ -91,3 +95,9 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+
+    def getTrainCamInfos(self, scale=1.0):
+        return self.train_camInfos[scale]
+
+    def getTestCamInfos(self, scale=1.0):
+        return self.test_camInfos[scale]

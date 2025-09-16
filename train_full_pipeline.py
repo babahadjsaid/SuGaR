@@ -77,11 +77,11 @@ if __name__ == "__main__":
                         help="Default configs for time to spend on refinement. Can be 'short', 'medium' or 'long'.")
       
     # Evaluation split
-    parser.add_argument('--eval', type=str2bool, default=True, help='Use eval split.')
+    parser.add_argument('--eval', type=str2bool, default=False, help='Use eval split.')
 
     # GPU
     parser.add_argument('--gpu', type=int, default=0, help='Index of GPU device to use.')
-    parser.add_argument('--white_background', type=str2bool, default=False, help='Use a white background instead of black.')
+    parser.add_argument('--white_background', type=str2bool, default=True, help='Use a white background instead of black.')
 
     # Parse arguments
     args = parser.parse_args()
@@ -90,8 +90,8 @@ if __name__ == "__main__":
         args.gaussians_per_triangle = 6
         print('Using low poly config.')
     if args.high_poly:
-        args.n_vertices_in_mesh = 3_000_000
-        args.gaussians_per_triangle = 1
+        args.n_vertices_in_mesh = 4_000_000
+        args.gaussians_per_triangle = 5
         print('Using high poly config.')
     if args.refinement_time == 'short':
         args.refinement_iterations = 2_000
@@ -123,7 +123,7 @@ if __name__ == "__main__":
                 -s {args.scene_path} \
                 -m {gs_checkpoint_dir} \
                 {white_background_str}\
-                --iterations {GS_CHK_POINT}"
+                --iterations {GS_CHK_POINT} -r 1"
         )
     else:
         print("A vanilla 3DGS checkpoint was provided. Skipping the vanilla 3DGS optimization.")
