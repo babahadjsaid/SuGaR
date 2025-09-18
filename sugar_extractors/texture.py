@@ -109,6 +109,7 @@ def compute_textured_mesh_for_sugar_mesh(
     
     print(f"Processing images...")
     for cam_idx in range(len(sugar.nerfmodel.training_cameras)):
+        torch.cuda.empty_cache()  # Clear CUDA cache to prevent memory issues
         if texture_with_gaussian_renders:
             rgb_img = sugar.render_image_gaussian_rasterizer(
                 nerf_cameras=sugar.nerfmodel.training_cameras,
@@ -120,7 +121,23 @@ def compute_textured_mesh_for_sugar_mesh(
             rgb_img = rgb_img.view(1, height, width, 3)
         else:
             raise NotImplementedError("Should use GT RGB image if texture_with_gaussian_renders is False.")
-        fragments = rasterizer(sugar.surface_mesh, cam_idx=cam_idx)
+        
+        # Try rasterization with error handling for CUDA issues
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                fragments = rasterizer(sugar.surface_mesh, cam_idx=cam_idx)
+                break
+            except RuntimeError as e:
+                if "Cuda error" in str(e) and attempt < max_retries - 1:
+                    print(f"CUDA error in rasterization (attempt {attempt + 1}/{max_retries}): {e}")
+                    torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
+                    continue
+                else:
+                    raise e
+        
         bary_coords = fragments.bary_coords.view(1, height, width, 3)
         pix_to_face = fragments.pix_to_face.view(1, height, width)
 
