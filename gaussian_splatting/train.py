@@ -9,7 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-import gc
+import gc, torch
 import os
 import numpy  # Added to avoid issue
 import torch
@@ -24,6 +24,13 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+
+# Import depth-normal utilities
+from depth_normal_utils import (
+    depth_normal_consistency_loss,
+    render_depth_and_normal
+)
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -51,6 +58,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter += 1
     train_dataloader = scene.getTrainCameras()  # Get DataLoader
     train_iter = iter(train_dataloader)  # Iterator for the DataLoader
+    
+    # Hardcoded intervals for depth-normal consistency and entropy regularization
+    dn_consistency_intervals = [(6000, 6999), (29000, 29999)]
+    entropy_reg_intervals = [(6900, 6999), (29900, 29999)]
+    dn_consistency_factor = 0.1  # Weight for DN consistency loss
+    entropy_reg_factor = 0.1  # Weight for entropy regularization
+    
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -96,10 +110,86 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        
+        # Check if current iteration is in any DN consistency interval
+        apply_dn_consistency = any(start <= iteration <= end for start, end in dn_consistency_intervals)
+        
+        # Add Depth-Normal consistency loss during specified intervals
+        if apply_dn_consistency:
+            try:
+                # Render depth and normals using Gaussian rasterizer (proper blending approach)
+                depth_img, normal_img = render_depth_and_normal(viewpoint_cam, gaussians, pipe, bg)
+                
+                # Only compute loss if we have valid depth and normals
+                if depth_img.max() > 0 and normal_img.norm(dim=-1).max() > 0:
+                    # Reshape for consistency loss function
+                    depth_tensor = depth_img[None]  # Shape: (1, height, width)
+                    normal_tensor = normal_img.permute(2, 0, 1)  # Shape: (3, height, width)
+                    
+                    # Compute depth-normal consistency loss
+                    normal_error = depth_normal_consistency_loss(
+                        depth=depth_tensor,
+                        normal=normal_tensor,
+                        camera=viewpoint_cam,
+                        scale_rendered_normals=False,
+                        return_normal_maps=False,
+                    )
+                    
+                    # Add to total loss
+                    loss = loss + dn_consistency_factor * normal_error
+                    
+                    # Log the DN consistency loss
+                    if tb_writer and iteration % 100 == 0:
+                        tb_writer.add_scalar('train_loss_patches/dn_consistency_loss', normal_error.item(), iteration)
+                        
+            except Exception as e:
+                # If DN consistency fails, continue without it
+                if iteration % 1000 == 0:  # Only print warning occasionally
+                    print(f"Warning: DN consistency loss failed at iteration {iteration}: {e}")
+                pass
+        
+        # Check if current iteration is in any entropy regularization interval
+        apply_entropy_reg = any(start <= iteration <= end for start, end in entropy_reg_intervals)
+        
+        # Add entropy regularization for opacities during specified intervals
+        if apply_entropy_reg:
+            try:
+                # Get opacities from gaussians
+                opacities = gaussians.get_opacity()
+                
+                # Apply visibility filter if available
+                if 'visibility_filter' in locals() and visibility_filter is not None:
+                    vis_opacities = opacities[visibility_filter]
+                else:
+                    vis_opacities = opacities
+                
+                # Compute entropy regularization loss
+                # L_entropy = -p*log(p) - (1-p)*log(1-p)
+                entropy_loss = (
+                    - vis_opacities * torch.log(vis_opacities + 1e-10)
+                    - (1 - vis_opacities) * torch.log(1 - vis_opacities + 1e-10)
+                ).mean()
+                
+                # Add to total loss
+                loss = loss + entropy_reg_factor * entropy_loss
+                
+                # Log the entropy regularization loss
+                if tb_writer and iteration % 100 == 0:
+                    tb_writer.add_scalar('train_loss_patches/entropy_reg_loss', entropy_loss.item(), iteration)
+                    
+            except Exception as e:
+                # If entropy regularization fails, continue without it
+                if iteration % 1000 == 0:  # Only print warning occasionally
+                    print(f"Warning: Entropy regularization failed at iteration {iteration}: {e}")
+                pass
+        
         loss.backward()
 
         iter_end.record()
-
+        del gt_image, viewpoint_cam, image, render_pkg
+        torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.synchronize()
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -200,6 +290,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         gc.collect()
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method('spawn')# good solution !!!!
+    torch.multiprocessing.set_sharing_strategy('file_system')  # Use files instead of SHM for data sharing
+    
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)

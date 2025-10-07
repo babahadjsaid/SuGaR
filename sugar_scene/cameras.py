@@ -479,8 +479,8 @@ class CamerasWrapper:
             self.image_dataset,
             batch_size=batch_size,  # Default to 1, matches train_num_images_per_batch
             shuffle=True,  # Preserve order for camera indices
-            num_workers=12,  # For prefetching (adjust based on CPU cores)
-            prefetch_factor=60,  # Prefetch 2 batches ahead
+            num_workers=6,  # For prefetching (adjust based on CPU cores)
+            prefetch_factor=20,  # Prefetch 2 batches ahead
             pin_memory=True,  # Faster GPU transfer
             persistent_workers=True,  # Keep workers alive
         )

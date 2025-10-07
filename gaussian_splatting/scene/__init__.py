@@ -72,7 +72,7 @@ class Scene:
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraDataLoader_from_camInfos(scene_info.train_cameras, resolution_scale, args, shuffle=True)
+            self.train_cameras[resolution_scale] = cameraDataLoader_from_camInfos(scene_info.train_cameras, resolution_scale, args)
             self.train_camInfos[resolution_scale] = scene_info.train_cameras  # Keep camInfos for validation
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraDataLoader_from_camInfos(scene_info.test_cameras, resolution_scale, args)

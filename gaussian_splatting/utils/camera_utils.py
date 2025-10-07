@@ -9,6 +9,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import gc
+from functools import partial
 from scene.cameras import Camera
 import numpy as np
 import os  # Add os import
@@ -68,14 +70,14 @@ class CameraImageDataset(Dataset):
         ])
         image_tensor = transform(image)
         # Only return RGB channels
-        gt_image = image_tensor[:3, ...]
+        gt_image = image_tensor[:3, ...].detach().clone()
         
-        # Create Camera object
-        camera = Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
+        del image, image_tensor
+        return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                         FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                         image=gt_image, gt_alpha_mask=None,  # Assuming no mask for now
                         image_name=cam_info.image_name, uid=idx, data_device=self.args.data_device)
-        return camera
+        
 
 def loadCam(args, id, cam_info, resolution_scale):
     if cam_info.image is not None:
@@ -118,10 +120,22 @@ def loadCam(args, id, cam_info, resolution_scale):
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device)
 
+def collate(x, batch_size): 
+    return x[0] if batch_size == 1 else x
 # Returns a DataLoader for camera images
-def cameraDataLoader_from_camInfos(cam_infos, resolution_scale, args, batch_size=1, shuffle=False, num_workers=0, pin_memory=False, persistent_workers=False):
+def cameraDataLoader_from_camInfos(cam_infos, resolution_scale, args, batch_size=1):
+    shuffle = True
+    if len(cam_infos) < 1:
+        shuffle = False
+    collate_fn = partial(collate, batch_size=batch_size)
     dataset = CameraImageDataset(cam_infos, args, resolution_scale)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent_workers, collate_fn=lambda x: x[0] if batch_size == 1 else x)
+    dataloader = DataLoader(dataset, batch_size=batch_size, 
+                            shuffle=shuffle,  # Preserve order for camera indices
+                            num_workers=4,  # For prefetching (adjust based on CPU cores)
+                            prefetch_factor=15,  # Prefetch 2 batches ahead
+                            pin_memory=True,  
+                            persistent_workers=True,  
+                            collate_fn=collate_fn)
     return dataloader
 
 def camera_to_JSON(id, camera : Camera):

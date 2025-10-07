@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import gc
 import torch
 from torch import nn
 import numpy as np
@@ -55,6 +56,14 @@ class Camera(nn.Module):
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
+    # a function when camera is deleted it makes sure it is removed from gpu memory the image
+    def __del__(self):
+        try:
+            del self.original_image
+            torch.cuda.empty_cache()
+            gc.collect()
+        except:
+            pass
 
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
